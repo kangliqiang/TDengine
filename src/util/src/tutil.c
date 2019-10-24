@@ -140,28 +140,31 @@ char *strnchr(char *haystack, char needle, int32_t len, bool skipquote) {
   return NULL;
 }
 
-void strtolower(char *dst, const char *z) {
-  int   quote = 0;
-  char *str = z;
-  if (dst == NULL) {
-    return;
+char* strtolower(char *dst, const char *src) {
+  int esc = 0;
+  char quote = 0, *p = dst, c;
+
+  assert(dst != NULL);
+
+  for (c = *src++; c; c = *src++) {
+    if (esc) {
+      esc = 0;
+    } else if (quote) {
+      if (c == '\\') {
+        esc = 1;
+      } else if (c == quote) {
+        quote = 0;
+      }
+    } else if (c >= 'A' && c <= 'Z') {
+      c -= 'A' - 'a';
+    } else if (c == '\'' || c == '"') {
+      quote = c;
+    }
+    *p++ = c;
   }
 
-  while (*str) {
-    if (*str == '\'' || *str == '"') {
-      quote = quote ^ 1;
-    }
-
-    if ((!quote) && (*str >= 'A' && *str <= 'Z')) {
-      *dst++ = *str | 0x20;
-    } else {
-      *dst++ = *str;
-    }
-
-    str++;
-  }
-
-  *dst = 0;
+  *p = 0;
+  return dst;
 }
 
 char *paGetToken(char *string, char **token, int32_t *tokenLen) {
@@ -466,4 +469,42 @@ bool taosValidateEncodec(char *encodec) {
 #else
   return true;
 #endif
+}
+
+bool taosGetVersionNumber(char *versionStr, int *versionNubmer) {
+  if (versionStr == NULL || versionNubmer == NULL) {
+    return false;
+  }
+
+  int versionNumberPos[4] = {0};
+  int len = strlen(versionStr);
+  int dot = 0;
+  for (int pos = 0; pos < len && dot < 4; ++pos) {
+    if (versionStr[pos] == '.') {
+      versionStr[pos] = 0;
+      versionNumberPos[++dot] = pos + 1;
+    }
+  }
+
+  if (dot != 3) {
+    return false;
+  }
+
+  for (int pos = 0; pos < 4; ++pos) {
+    versionNubmer[pos] = atoi(versionStr + versionNumberPos[pos]);
+  }
+  versionStr[versionNumberPos[1] - 1] = '.';
+  versionStr[versionNumberPos[2] - 1] = '.';
+  versionStr[versionNumberPos[3] - 1] = '.';
+
+  return true;
+}
+
+char *taosIpStr(int ipInt) {
+  static char ipStrArray[3][30];
+  static int ipStrIndex = 0;
+
+  char *ipStr = ipStrArray[(ipStrIndex++) % 3];
+  sprintf(ipStr, "0x%x:%d.%d.%d.%d", ipInt, ipInt & 0xFF, (ipInt >> 8) & 0xFF, (ipInt >> 16) & 0xFF, ipInt >> 24);
+  return ipStr;
 }

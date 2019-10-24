@@ -108,7 +108,7 @@ static int32_t validateColumnName(char* name);
 static int32_t setKillInfo(SSqlObj* pSql, struct SSqlInfo* pInfo);
 static bool    hasTimestampForPointInterpQuery(SSqlCmd* pCmd);
 static void    updateTagColumnIndex(SSqlCmd* pCmd);
-static int32_t setLimitOffsetValueInfo(SSqlObj* pSql, SQuerySQL* pQuerySql);
+static int32_t parseLimitClause(SSqlObj* pSql, SQuerySQL* pQuerySql);
 static void    addRequiredTagColumn(SSqlCmd* pCmd, int32_t tagColIndex);
 static int32_t parseCreateDBOptions(SCreateDBInfo* pCreateDbSql, SSqlCmd* pCmd);
 
@@ -876,7 +876,7 @@ int32_t tscToSQLCmd(SSqlObj* pSql, struct SSqlInfo* pInfo) {
       pCmd->limit = pQuerySql->limit;
 
       /* temporarily save the original limitation value */
-      if ((code = setLimitOffsetValueInfo(pSql, pQuerySql)) != TSDB_CODE_SUCCESS) {
+      if ((code = parseLimitClause(pSql, pQuerySql)) != TSDB_CODE_SUCCESS) {
         return code;
       }
 
@@ -2428,7 +2428,7 @@ static int setColumnFilterInfoForTimestamp(SSqlCmd* pCmd, tVariant* pVar) {
   }
 
   tVariantDestroy(pVar);
-  tVariantCreateB(pVar, &time, 0, TSDB_DATA_TYPE_BIGINT);
+  tVariantCreateB(pVar, (char*)&time, 0, TSDB_DATA_TYPE_BIGINT);
 
   return TSDB_CODE_SUCCESS;
 }
@@ -3197,8 +3197,14 @@ int32_t buildQueryCond(SSqlObj* pSql, tSQLExpr* pExpr) {
 }
 
 int32_t getTimeRange(int64_t* stime, int64_t* etime, tSQLExpr* pRight, int32_t optr, int16_t timePrecision) {
-  assert(pRight->nSQLOptr == TK_INTEGER || pRight->nSQLOptr == TK_FLOAT || pRight->nSQLOptr == TK_STRING ||
-         pRight->nSQLOptr == TK_TIMESTAMP);
+  /*
+   * filter primary ts filter expression like:
+   *     "where ts in ('2015-12-12 4:8:12')"
+   * is not supported.
+   */
+  if (pRight->nSQLOptr == TK_SET || optr == TK_IN) {
+    return TSDB_CODE_INVALID_SQL;
+  }
 
   int64_t val = 0;
   bool    parsed = false;
@@ -3850,7 +3856,7 @@ int32_t validateDNodeConfig(tDCLSQL* pOptions) {
   }
 
   SDNodeDynConfOption DNODE_DYNAMIC_CFG_OPTIONS[13] = {
-      {"resetLog", 8},      {"resetQueryCache", 15}, {"dDebugFlag", 10},       {"taosDebugFlag", 13},
+      {"resetLog", 8},      {"resetQueryCache", 15}, {"dDebugFlag", 10},       {"rpcDebugFlag", 12},
       {"tmrDebugFlag", 12}, {"cDebugFlag", 10},      {"uDebugFlag", 10},       {"mDebugFlag", 10},
       {"sdbDebugFlag", 12}, {"httpDebugFlag", 13},   {"monitorDebugFlag", 16}, {"qDebugflag", 10},
       {"debugFlag", 9}};
@@ -3930,20 +3936,29 @@ bool hasTimestampForPointInterpQuery(SSqlCmd* pCmd) {
   return (pCmd->stime == pCmd->etime) && (pCmd->stime != 0);
 }
 
-int32_t setLimitOffsetValueInfo(SSqlObj* pSql, SQuerySQL* pQuerySql) {
-  SSqlCmd* pCmd = &pSql->cmd;
-  bool     isMetric = UTIL_METER_IS_METRIC(pCmd);
+int32_t parseLimitClause(SSqlObj* pSql, SQuerySQL* pQuerySql) {
+  SSqlCmd*        pCmd = &pSql->cmd;
 
-  const char* msg0 = "soffset can not be less than 0";
-  const char* msg1 = "offset can not be less than 0";
-  const char* msg2 = "slimit/soffset only available for STable query";
-  const char* msg3 = "function not supported on table";
+  const char* msg0 = "soffset/offset can not be less than 0";
+  const char* msg1 = "slimit/soffset only available for STable query";
+  const char* msg2 = "function not supported on table";
+  const char* msg3 = "slimit/soffset can not apply to projection query";
 
   // handle the limit offset value, validate the limit
   pCmd->limit = pQuerySql->limit;
   pCmd->glimit = pQuerySql->glimit;
 
-  if (isMetric) {
+  if (pCmd->glimit.offset < 0 || pCmd->limit.offset < 0) {
+    setErrMsg(pCmd, msg0);
+    return TSDB_CODE_INVALID_SQL;
+  }
+
+  if (pCmd->limit.limit == 0) {
+    tscTrace("%p limit 0, no output result", pSql);
+    pCmd->command = TSDB_SQL_RETRIEVE_EMPTY_RESULT;
+  }
+
+  if (UTIL_METER_IS_METRIC(pCmd)) {
     bool    queryOnTags = false;
     int32_t ret = tscQueryOnlyMetricTags(pCmd, &queryOnTags);
     if (ret != TSDB_CODE_SUCCESS) {
@@ -3952,34 +3967,30 @@ int32_t setLimitOffsetValueInfo(SSqlObj* pSql, SQuerySQL* pQuerySql) {
 
     if (queryOnTags == true) {  // local handle the metric tag query
       pCmd->command = TSDB_SQL_RETRIEVE_TAGS;
+    } else {
+      if (tscProjectionQueryOnMetric(pSql) && (pCmd->glimit.limit > 0 || pCmd->glimit.offset > 0)) {
+        setErrMsg(pCmd, msg3);
+        return TSDB_CODE_INVALID_SQL;
+      }
     }
 
-    if (pCmd->glimit.limit == 0 || pCmd->limit.limit == 0) {
+    if (pCmd->glimit.limit == 0) {
       tscTrace("%p limit 0, no output result", pSql);
       pCmd->command = TSDB_SQL_RETRIEVE_EMPTY_RESULT;
       return TSDB_CODE_SUCCESS;
     }
 
-    if (pCmd->glimit.offset < 0) {
-      setErrMsg(pCmd, msg0);
-      return TSDB_CODE_INVALID_SQL;
-    }
-
     /*
-     * get the distribution of all meters among available vnodes that satisfy query condition from mnode ,
-     * then launching multiple async-queries on referenced vnodes, which is the first-stage query operation]
+     * get the distribution of all tables among available virtual nodes that satisfy query condition and
+     * created according to this super table from management node.
+     * And then launching multiple async-queries on required virtual nodes, which is the first-stage query operation.
      */
     int32_t code = tscGetMetricMeta(pSql, pCmd->name);
     if (code != TSDB_CODE_SUCCESS) {
       return code;
     }
 
-    /*
-     * Query results are empty. Therefore, the result is filled with 0 if count function is employed in selection
-     * clause.
-     *
-     * The fill of empty result is required only when interval clause is absent.
-     */
+    //No tables included. No results generated. Query results are empty.
     SMetricMeta* pMetricMeta = pCmd->pMetricMeta;
     if (pCmd->pMeterMeta == NULL || pMetricMeta == NULL || pMetricMeta->numOfVnodes == 0 ||
         pMetricMeta->numOfMeters == 0) {
@@ -3991,26 +4002,17 @@ int32_t setLimitOffsetValueInfo(SSqlObj* pSql, SQuerySQL* pQuerySql) {
     pCmd->globalLimit = pCmd->limit.limit;
   } else {
     if (pCmd->glimit.limit != -1 || pCmd->glimit.offset != 0) {
-      setErrMsg(pCmd, msg2);
+      setErrMsg(pCmd, msg1);
       return TSDB_CODE_INVALID_SQL;
     }
 
+    // filter the query functions operating on "tbname" column that are not supported by normal columns.
     for (int32_t i = 0; i < pCmd->fieldsInfo.numOfOutputCols; ++i) {
       SSqlExpr* pExpr = tscSqlExprGet(pCmd, i);
       if (pExpr->colInfo.colIdx == -1) {
-        setErrMsg(pCmd, msg3);
+        setErrMsg(pCmd, msg2);
         return TSDB_CODE_INVALID_SQL;
       }
-    }
-
-    if (pCmd->limit.limit == 0) {
-      tscTrace("%p limit 0, no output result", pSql);
-      pCmd->command = TSDB_SQL_RETRIEVE_EMPTY_RESULT;
-    }
-
-    if (pCmd->limit.offset < 0) {
-      setErrMsg(pCmd, msg1);
-      return TSDB_CODE_INVALID_SQL;
     }
   }
 

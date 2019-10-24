@@ -1,4 +1,4 @@
-char version[64] = "1.6.1.6";
+char version[64] = "1.6.3.0";
 char compatible_version[64] = "1.6.1.0";
-char gitinfo[128] = "5e556960a01f888badbc55d9b1fd18bf62a128d3";
-char buildinfo[512] = "Built by slguan at 2019-08-14 19:22";
+char gitinfo[128] = "49080adeee33c95d1174ac96eca9e62536e2da0f";
+char buildinfo[512] = "Built by ubuntu at 2019-10-21 19:33";

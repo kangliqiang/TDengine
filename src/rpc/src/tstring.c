@@ -233,5 +233,7 @@ char *tsError[] = {"success",
                    "invalid query message",
                    "timestamp disordered in cache block",
                    "timestamp disordered in file block",
-                   "invalid commit log"
+                   "invalid commit log",
+                   "server no disk space",
+                   "invalid submit message",
 };

@@ -63,7 +63,9 @@ TAOS *taos_connect_imp(char *ip, char *user, char *pass, char *db, int port, voi
   }
 
   if (ip && ip[0]) {
-    strcpy(tsServerIpStr, ip);
+    if (ip != tsServerIpStr) {
+      strcpy(tsServerIpStr, ip);
+    }
     tsServerIp = inet_addr(ip);
   }
 
@@ -97,8 +99,8 @@ TAOS *taos_connect_imp(char *ip, char *user, char *pass, char *db, int port, voi
   memset(pSql, 0, sizeof(SSqlObj));
   pSql->pTscObj = pObj;
   pSql->signature = pSql;
-  sem_init(&pSql->rspSem, 0, 0);
-  sem_init(&pSql->emptyRspSem, 0, 1);
+  tsem_init(&pSql->rspSem, 0, 0);
+  tsem_init(&pSql->emptyRspSem, 0, 1);
   pObj->pSql = pSql;
   pSql->fp = fp;
   pSql->param = param;
@@ -134,13 +136,36 @@ TAOS *taos_connect(char *ip, char *user, char *pass, char *db, int port) {
 
   void *taos = taos_connect_imp(ip, user, pass, db, port, NULL, NULL, NULL);
   if (taos != NULL) {
-    char *server_version = taos_get_server_info(taos);
-    if (server_version && strcmp(server_version, version) != 0) {
-      tscError("taos:%p, server version:%s not equal with client version:%s, close connection",
-               taos, server_version, version);
+    STscObj* pObj = (STscObj*) taos;
+
+    int clientVersionNumber[4] = {0};
+    if (!taosGetVersionNumber(version, clientVersionNumber)) {
+      tscError("taos:%p, invalid client version:%s", taos, version);
+      pObj->pSql->res.code = TSDB_CODE_INVALID_CLIENT_VERSION;
       taos_close(taos);
-      globalCode = TSDB_CODE_INVALID_CLIENT_VERSION;
       return NULL;
+    }
+
+    char *server_version = taos_get_server_info(taos);
+    int serverVersionNumber[4] = {0};
+    if (!taosGetVersionNumber(server_version, serverVersionNumber)) {
+      tscError("taos:%p, invalid server version:%s", taos, server_version);
+      pObj->pSql->res.code = TSDB_CODE_INVALID_CLIENT_VERSION;
+      taos_close(taos);
+      return NULL;
+    }
+
+    // version compare only requires the first 3 segments of the version string
+    int32_t comparedSegments = 3;
+
+    for(int32_t i = 0; i < comparedSegments; ++i) {
+      if (clientVersionNumber[i] != serverVersionNumber[i]) {
+        tscError("taos:%p, the %d-th number of server version:%s not matched with client version:%s, close connection",
+                 taos, i, server_version, version);
+        pObj->pSql->res.code = TSDB_CODE_INVALID_CLIENT_VERSION;
+        taos_close(taos);
+        return NULL;
+      }
     }
   }
 
@@ -457,7 +482,7 @@ int taos_fetch_block(TAOS_RES *res, TAOS_ROW *rows) {
   // projection query on metric, pipeline retrieve data from vnode list, instead
   // of two-stage mergevnodeProcessMsgFromShell free qhandle
   nRows = taos_fetch_block_impl(res, rows);
-  if (*rows == NULL && tscProjectionQueryOnMetric(pSql)) {
+  while (*rows == NULL && tscProjectionQueryOnMetric(pSql)) {
     /* reach the maximum number of output rows, abort */
     if (pCmd->globalLimit > 0 && pRes->numOfTotal >= pCmd->globalLimit) {
       return 0;
@@ -465,12 +490,18 @@ int taos_fetch_block(TAOS_RES *res, TAOS_ROW *rows) {
 
     /* update the limit value according to current retrieval results */
     pCmd->limit.limit = pSql->cmd.globalLimit - pRes->numOfTotal;
+    pCmd->limit.offset = pRes->offset;
 
     if ((++pSql->cmd.vnodeIdx) <= pSql->cmd.pMetricMeta->numOfVnodes) {
       pSql->cmd.command = TSDB_SQL_SELECT;
       assert(pSql->fp == NULL);
       tscProcessSql(pSql);
       nRows = taos_fetch_block_impl(res, rows);
+    }
+
+    // check!!!
+    if (*rows != NULL || pCmd->vnodeIdx >= pCmd->pMetricMeta->numOfVnodes) {
+      break;
     }
   }
 
@@ -572,7 +603,7 @@ int taos_errno(TAOS *taos) {
 
   if (pObj == NULL || pObj->signature != pObj) return globalCode;
 
-  if (pObj->pSql->res.code == -1)
+  if ((int8_t)(pObj->pSql->res.code) == -1)
     code = TSDB_CODE_OTHERS;
   else
     code = pObj->pSql->res.code;
@@ -587,13 +618,13 @@ char *taos_errstr(TAOS *taos) {
 
   if (pObj == NULL || pObj->signature != pObj) return tsError[globalCode];
 
-  if (pObj->pSql->res.code == -1)
+  if ((int8_t)(pObj->pSql->res.code) == -1)
     code = TSDB_CODE_OTHERS;
   else
     code = pObj->pSql->res.code;
 
   if (code == TSDB_CODE_INVALID_SQL) {
-    sprintf(temp, "invalid SQL: %s", pObj->pSql->cmd.payload);
+    snprintf(temp, tListLen(temp), "invalid SQL: %s", pObj->pSql->cmd.payload);
     strcpy(pObj->pSql->cmd.payload, temp);
     return pObj->pSql->cmd.payload;
   } else {
@@ -665,7 +696,7 @@ int taos_print_row(char *str, TAOS_ROW row, TAOS_FIELD *fields, int num_fields) 
         break;
 
       case TSDB_DATA_TYPE_BIGINT:
-        len += sprintf(str + len, "%ld ", *((int64_t *)row[i]));
+        len += sprintf(str + len, "%lld ", *((int64_t *)row[i]));
         break;
 
       case TSDB_DATA_TYPE_FLOAT:
@@ -677,14 +708,21 @@ int taos_print_row(char *str, TAOS_ROW row, TAOS_FIELD *fields, int num_fields) 
         break;
 
       case TSDB_DATA_TYPE_BINARY:
-      case TSDB_DATA_TYPE_NCHAR:
+      case TSDB_DATA_TYPE_NCHAR:{
         /* limit the max length of string to no greater than the maximum length,
          * in case of not null-terminated string */
-        len += snprintf(str + len, (size_t)fields[i].bytes + 1, "%s ", (char *)row[i]);
+        size_t xlen = strlen(row[i]);
+        size_t trueLen = MIN(xlen, fields[i].bytes);
+
+        memcpy(str + len, (char*) row[i], trueLen);
+
+        str[len + trueLen] = ' ';
+        len += (trueLen + 1);
+      }
         break;
 
       case TSDB_DATA_TYPE_TIMESTAMP:
-        len += sprintf(str + len, "%ld ", *((int64_t *)row[i]));
+        len += sprintf(str + len, "%lld ", *((int64_t *)row[i]));
         break;
 
       case TSDB_DATA_TYPE_BOOL:
