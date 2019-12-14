@@ -25,7 +25,7 @@ TDengine缺省的时间戳是毫秒精度，但通过修改配置参数enableMic
 
 |      |   类型    | Bytes  | 说明                                                         |
 | ---- | :-------: | ------ | ------------------------------------------------------------ |
-| 1    | TIMESTAMP | 8      | 时间戳。最小精度毫秒。从格林威治时间1970-01-01 08:00:00.000开始，计时不能早于该时间。 |
+| 1    | TIMESTAMP | 8      | 时间戳。最小精度毫秒。从格林威治时间 1970-01-01 00:00:00.000 (UTC/GMT) 开始，计时不能早于该时间。 |
 | 2    |    INT    | 4      | 整型，范围 [-2^31+1,   2^31-1], -2^31被用作Null值            |
 | 3    |  BIGINT   | 8      | 长整型，范围 [-2^59,   2^59]                                 |
 | 4    |   FLOAT   | 4      | 浮点型，有效位数6-7，范围 [-3.4E38, 3.4E38]                  |
@@ -424,9 +424,9 @@ SELECT function_list FROM tb_name
 
 SELECT function_list FROM stb_name 
   [WHERE where_condition]
-  [GROUP BY tags]
   INTERVAL (interval)
   [FILL ({ VALUE | PREV | NULL | LINEAR})]
+  [GROUP BY tags]
 ```
 
 - 聚合时间段的长度由关键词INTERVAL指定，最短时间间隔10毫秒（10a）。聚合查询中，能够同时执行的聚合和选择函数仅限于单个输出的函数：count、avg、sum 、stddev、leastsquares、percentile、min、max、first、last，不能使用具有多行输出结果的函数（例如：top、bottom、diff以及四则运算）。

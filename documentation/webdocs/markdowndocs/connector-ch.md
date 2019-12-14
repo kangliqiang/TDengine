@@ -4,13 +4,13 @@ TDengine提供了丰富的应用程序开发接口，其中包括C/C++、JAVA、
 
 ## C/C++ Connector
 
-C/C++的API类似于MySQL的C API。应用程序使用时，需要包含TDengine头文件 _taos.h_（安装后，位于_/usr/local/taos/include_）：
+C/C++的API类似于MySQL的C API。应用程序使用时，需要包含TDengine头文件 _taos.h_（安装后，位于 _/usr/local/taos/include_）：
 
 ```C
 #include <taos.h>
 ```
 
-在编译时需要链接TDengine动态库_libtaos.so_（安装后，位于/usr/local/taos/driver，gcc编译时，请加上 -ltaos）。 所有API都以返回_-1_或_NULL_均表示失败。
+在编译时需要链接TDengine动态库 _libtaos.so_ （安装后，位于 _/usr/local/taos/driver_，gcc编译时，请加上 -ltaos）。 如未特别说明，当API的返回值是整数时，_0_ 代表成功，其它是代表失败原因的错误码，当返回值是指针时， _NULL_ 表示失败。
 
 ### C/C++同步API
 
@@ -78,6 +78,51 @@ C/C++的API类似于MySQL的C API。应用程序使用时，需要包含TDengine
 上述12个API是C/C++接口中最重要的API，剩余的辅助API请参看_taos.h_文件。
 
 **注意**：对于单个数据库连接，在同一时刻只能有一个线程使用该链接调用API，否则会有未定义的行为出现并可能导致客户端crash。客户端应用可以通过建立多个连接进行多线程的数据写入或查询处理。
+
+### C/C++ 参数绑定接口
+
+除了直接调用 `taos_query` 进行查询，TDengine也提供了支持参数绑定的Prepare API，与 MySQL 一样，这些API目前也仅支持用问号`?`来代表待绑定的参数，具体如下：
+
+- `TAOS_STMT* taos_stmt_init(TAOS *taos)`
+
+  创建一个 TAOS_STMT 对象用于后续调用。
+
+- `int taos_stmt_prepare(TAOS_STMT *stmt, const char *sql, unsigned long length)`
+
+  解析一条sql语句，将解析结果和参数信息绑定到stmt上，如果参数length大于0，将使用此此参数作为sql语句的长度，如等于0，将自动判断sql语句的长度。
+
+- `int taos_stmt_bind_param(TAOS_STMT *stmt, TAOS_BIND *bind)`
+
+  进行参数绑定，bind指向一个数组，需保证此数组的元素数量和顺序与sql语句中的参数完全一致。TAOS_BIND 的使用方法与 MySQL中的 MYSQL_BIND 一致，具体定义如下：
+
+  ```c
+  typedef struct TAOS_BIND {
+    int            buffer_type;
+    void *         buffer;
+    unsigned long  buffer_length;  // 未实际使用
+    unsigned long *length;
+    int *          is_null;
+    int            is_unsigned;    // 未实际使用
+    int *          error;          // 未实际使用
+  } TAOS_BIND;
+  ```
+
+- `int taos_stmt_add_batch(TAOS_STMT *stmt)`
+
+  将当前绑定的参数加入批处理中，调用此函数后，可以再次调用`taos_stmt_bind_param`绑定新的参数。需要注意，此函数仅支持 insert/import 语句，如果是select等其他SQL语句，将返回错误。
+
+- `int taos_stmt_execute(TAOS_STMT *stmt)`
+
+  执行准备好的语句。目前，一条语句只能执行一次。
+
+- `TAOS_RES* taos_stmt_use_result(TAOS_STMT *stmt)`
+
+  获取语句的结果集。结果集的使用方式与非参数化调用时一致，使用完成后，应对此结果集调用 `taos_free_result`以释放资源。
+  
+- `int taos_stmt_close(TAOS_STMT *stmt)`
+
+  执行完毕，释放所有资源。
+
 
 ### C/C++异步API
 
@@ -224,13 +269,14 @@ public Connection getConn() throws Exception{
 
 用户可以在源代码的src/connector/python文件夹下找到python2和python3的安装包。用户可以通过pip命令安装： 
 
-​		`pip install src/connector/python/python2/`
+​		`pip install src/connector/python/[linux|windows]/python2/`
 
 或
 
-​		`pip install src/connector/python/python3/`
+​		`pip install src/connector/python/[linux|windows]/python3/`
 
 如果机器上没有pip命令，用户可将src/connector/python/python3或src/connector/python/python2下的taos文件夹拷贝到应用程序的目录使用。
+对于windows 客户端，安装TDengine windows 客户端后，将C:\TDengine\driver\taos.dll拷贝到C:\windows\system32目录下即可。所有TDengine的连接器，均需依赖taos.dll。
 
 ### Python客户端接口
 
@@ -346,15 +392,64 @@ curl -u username:password -d '<SQL>' <ip>:<PORT>/rest/sql
 
 ## Go Connector
 
-TDengine提供了GO驱动程序“taosSql”包。taosSql驱动包是基于GO的“database/sql/driver”接口的实现。用户可在安装后的/usr/local/taos/connector/go目录获得GO的客户端驱动程序。用户需将驱动包/usr/local/taos/connector/go/src/taosSql目录拷贝到应用程序工程的src目录下。然后在应用程序中导入驱动包，就可以使用“database/sql”中定义的接口访问TDengine：
+#### 安装TDengine
+
+Go的链接器使用了到了 libtaos.so 和taos.h，因此，在使用Go连接器之前，需要在程序运行的机器上安装TDengine以获得相关的驱动文件。
+
+#### Go语言引入package
+TDengine提供了GO驱动程序“taosSql”包。taosSql驱动包是基于GO的“database/sql/driver”接口的实现。用户可以通过`go get`命令来获取驱动包。
+```sh
+go get github.com/taosdata/TDengine/src/connector/go/src/taosSql
+```
+然后在应用程序中导入驱动包，就可以使用“database/sql”中定义的接口访问TDengine：
 
 ```Go
 import (
     "database/sql"
-    _ "taosSql"
+    _ "github.com/taosdata/TDengine/src/connector/go/src/taosSql"
 )
 ```
 
 taosSql驱动包内采用cgo模式，调用了TDengine的C/C++同步接口，与TDengine进行交互，因此，在数据库操作执行完成之前，客户端应用将处于阻塞状态。单个数据库连接，在同一时刻只能有一个线程调用API。客户应用可以建立多个连接，进行多线程的数据写入或查询处理。
 
-更多使用的细节，请参考下载目录中的示例源码。
+#### Go语言使用参考
+在Go程序中使用TDengine写入方法大致可以分为以下几步
+1. 打开TDengine数据库链接
+
+首先需要调用sql包中的Open方法，打开数据库，并获得db对象
+```go
+	db, err := sql.Open(taosDriverName, dbuser+":"+dbpassword+"@/tcp("+daemonUrl+")/"+dbname)
+	if err != nil {
+		log.Fatalf("Open database error: %s\n", err)
+	}
+	defer db.Close()
+```
+其中参数为
+-   taosDataname: 涛思数据库的名称，其值为字符串"taosSql"
+-   dbuser和dbpassword: 链接TDengine的用户名和密码，缺省为root和taosdata，类型为字符串
+-   daemonUrl: 为TDengine的地址，其形式为`ip address:port`形式，port填写缺省值0即可。例如："116.118.24.71:0"
+-   dbname：TDengine中的database名称，通过`create database`创建的数据库。如果为空则在后续的写入和查询操作必须通过”数据库名.超级表名或表名“的方式指定数据库名
+
+2. 创建数据库
+
+打开TDengine数据库连接后，首选需要创建数据库。基本用法和直接在TDengine客户端shell下一样，通过create database + 数据库名的方法来创建。
+```go
+	db, err := sql.Open(taosDriverName, dbuser+":"+dbpassword+"@/tcp("+daemonUrl+")/")
+	if err != nil {
+		log.Fatalf("Open database error: %s\n", err)
+	}
+    defer db.Close()
+    
+    //准备创建数据库语句
+    sqlcmd := fmt.Sprintf("create database if not exists %s", dbname)
+    
+    //执行语句并检查错误
+    _, err = db.Exec(sqlcmd)
+    if err != nil {
+        log.Fatalf("Create database error: %s\n", err)
+    }
+```
+
+3. 创建表、写入和查询数据
+
+在创建好了数据库后，就可以开始创建表和写入查询数据了。这些操作的基本思路都是首先组装SQL语句，然后调用db.Exec执行，并检查错误信息和执行相应的处理。可以参考上面的样例代码

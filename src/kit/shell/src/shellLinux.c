@@ -13,27 +13,9 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <argp.h>
-#include <assert.h>
-#include <assert.h>
-#include <error.h>
-#include <pwd.h>
-#include <regex.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/ioctl.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <termios.h>
-#include <time.h>
-#include <unistd.h>
-#include <wordexp.h>
-
 #define __USE_XOPEN
 
-#include <wchar.h>
+#include "os.h"
 
 #include "shell.h"
 #include "shellCommand.h"
@@ -56,7 +38,7 @@ static struct argp_option options[] = {
   {"user",       'u', "USER",       0,                   "The TDEngine user name to use when connecting to the server."},
   {"config-dir", 'c', "CONFIG_DIR", 0,                   "Configuration directory."},
   {"commands",   's', "COMMANDS",   0,                   "Commands to run without enter the shell."},
-  {"raw-time",   'r', 0,            0,                   "Output time as unsigned long."},
+  {"raw-time",   'r', 0,            0,                   "Output time as uint64_t."},
   {"file",       'f', "FILE",       0,                   "Script to run without enter the shell."},
   {"database",   'd', "DATABASE",   0,                   "Database to use when connecting to the server."},
   {"timezone",   't', "TIMEZONE",   0,                   "Time zone of the shell, default is local."},
@@ -123,6 +105,15 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 static struct argp argp = {options, parse_opt, args_doc, doc};
 
 void shellParseArgument(int argc, char *argv[], struct arguments *arguments) {
+  char verType[32] = {0};
+  #ifdef CLUSTER
+    sprintf(verType, "enterprise version: %s\n", version);
+  #else
+    sprintf(verType, "community version: %s\n", version);
+  #endif
+  
+  argp_program_version = verType;
+  
   argp_parse(&argp, argc, argv, 0, 0, arguments);
   if (arguments->abort) {
     error(10, 0, "ABORTED");
@@ -313,7 +304,7 @@ void shellPrintNChar(char *str, int width, bool printMode) {
     if (*str == '\0') break;
     char *tstr = str;
     int byte_width = mbtowc(&wc, tstr, MB_CUR_MAX);
-    if (byte_width <= 0 ) break;
+    if (byte_width <= 0) break;
     int col_width = wcwidth(wc);
     if (col_width <= 0) {
       str += byte_width;

@@ -293,19 +293,14 @@ bool httpReadChunkedBody(HttpContext* pContext, HttpParser* pParser) {
 int httpReadUnChunkedBody(HttpContext* pContext, HttpParser* pParser) {
   int dataReadLen = pParser->bufsize - (int)(pParser->data.pos - pParser->buffer);
   if (dataReadLen > pParser->data.len) {
-    httpError("context:%p, fd:%d, ip:%s, un-chunked body length invalid, dataReadLen:%d > pContext->data.len:%d",
-              pContext, pContext->fd, pContext->ipstr, dataReadLen, pParser->data.len);
+    httpError("context:%p, fd:%d, ip:%s, un-chunked body length invalid, read size:%d dataReadLen:%d > pContext->data.len:%d",
+              pContext, pContext->fd, pContext->ipstr, pContext->parser.bufsize, dataReadLen, pParser->data.len);
     httpSendErrorResp(pContext, HTTP_PARSE_BODY_ERROR);
     return HTTP_CHECK_BODY_ERROR;
   } else if (dataReadLen < pParser->data.len) {
-    httpTrace("context:%p, fd:%d, ip:%s, un-chunked body not finished, dataReadLen:%d < pContext->data.len:%d, continue read",
-              pContext, pContext->fd, pContext->ipstr, dataReadLen, pParser->data.len);
-    if (!httpReadDataImp(pContext)) {
-      httpError("context:%p, fd:%d, ip:%s, read chunked request error", pContext, pContext->fd, pContext->ipstr);
-      return HTTP_CHECK_BODY_ERROR;
-    } else {
-      return HTTP_CHECK_BODY_CONTINUE;
-    }
+    httpTrace("context:%p, fd:%d, ip:%s, un-chunked body not finished, read size:%d dataReadLen:%d < pContext->data.len:%d, continue read",
+              pContext, pContext->fd, pContext->ipstr, pContext->parser.bufsize, dataReadLen, pParser->data.len);
+    return HTTP_CHECK_BODY_CONTINUE;
   } else {
     return HTTP_CHECK_BODY_SUCCESS;
   }
@@ -391,20 +386,28 @@ bool httpDecodeRequest(HttpContext* pContext) {
  * Process the request from http pServer
  */
 bool httpProcessData(HttpContext* pContext) {
-  pContext->usedByApp = 1;
+
+  if (!httpAlterContextState(pContext, HTTP_CONTEXT_STATE_READY, HTTP_CONTEXT_STATE_HANDLING)) {
+    httpTrace("context:%p, fd:%d, ip:%s, state:%s not in ready state, stop process request",
+            pContext, pContext->fd, pContext->ipstr, httpContextStateStr(pContext->state));
+    httpCloseContextByApp(pContext);
+    return false;
+  }
 
   // handle Cross-domain request
   if (strcmp(pContext->parser.method.pos, "OPTIONS") == 0) {
     httpTrace("context:%p, fd:%d, ip:%s, process options request", pContext, pContext->fd, pContext->ipstr);
     httpSendOptionResp(pContext, "process options request success");
-    return HTTP_PROCESS_SUCCESS;
+  } else {
+    if (!httpDecodeRequest(pContext)) {
+      /*
+       * httpCloseContextByApp has been called when parsing the error
+       */
+      //httpCloseContextByApp(pContext);
+    } else {
+      httpProcessRequest(pContext);
+    }
   }
 
-  if (!httpDecodeRequest(pContext)) {
-    httpCloseContextByApp(pContext);
-    return HTTP_PROCESS_SUCCESS;
-  }
-
-  httpProcessRequest(pContext);
-  return HTTP_PROCESS_SUCCESS;
+  return true;
 }
