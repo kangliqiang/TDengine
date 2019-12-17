@@ -110,6 +110,14 @@ TAOS *shellInit(struct arguments *args) {
     exit(EXIT_SUCCESS);
   }
 
+#ifdef LINUX
+  if (args->dir[0] != 0) {
+    source_dir(con, args);
+    taos_close(con);
+    exit(EXIT_SUCCESS);
+  }
+#endif
+
   printf(SERVER_VERSION, taos_get_server_info(con));
 
   return con;
@@ -255,7 +263,7 @@ void shellRunCommandOnServer(TAOS *con, char command[]) {
     return;
   }
 
-  if (regex_match(command, "^\\s*use\\s+[a-zA-Z0-9]+\\s*;\\s*$", REG_EXTENDED | REG_ICASE)) {
+  if (regex_match(command, "^\\s*use\\s+[a-zA-Z0-9_]+\\s*;\\s*$", REG_EXTENDED | REG_ICASE)) {
     fprintf(stdout, "Database changed.\n\n");
     fflush(stdout);
     return;
@@ -762,7 +770,7 @@ void taos_error(TAOS *con) {
   taos_free_result(pRes);
 }
 
-static int isCommentLine(char *line) {
+int isCommentLine(char *line) {
   if (line == NULL) return 1;
 
   return regex_match(line, "^\\s*#.*", REG_EXTENDED);
